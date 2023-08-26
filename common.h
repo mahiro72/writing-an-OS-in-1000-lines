@@ -12,10 +12,11 @@ typedef uint32_t vaddr_t;
 #define true 1
 #define false 0
 #define NULL ((void *)0)
+#define PAGE_SIZE 4096
 
-#define align_up(value,align) __builtin_align_up(value,align)
-#define is_aligned(value,align) __builtin_is_aligned(value,align)
-#define offsetof(type,member) __builtin_offsetof(type,member)
+#define align_up(value,align) __builtin_align_up(value,align) // valueをalignの倍数に切り上げる
+#define is_aligned(value,align) __builtin_is_aligned(value,align) // valueがalignの倍数であるか判定する
+#define offsetof(type,member) __builtin_offsetof(type,member) //構造体のメンバのオフセット (メンバが構造体の先頭から何バイト目にあるか) を返す
 
 #define va_list  __builtin_va_list
 #define va_start __builtin_va_start
