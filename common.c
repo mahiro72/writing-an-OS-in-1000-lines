@@ -95,4 +95,56 @@ void printf(const char *fmt, ...) {
 }
 
 
+void *memset(void *buf, char c, size_t len) {
+	size_t i;
+ 	
+	i = 0;
+        while (i < len)
+		*(uint8_t *)(buf + i++) = (uint8_t)c;
+	return (buf);
+}
+
+void *memcpy(void *dst, const void *src, size_t n){
+	size_t i;
+
+	if (dst == src || n == 0)
+		return (dst);
+	
+	i = 0;
+	while (i < n){
+		*(uint8_t *)(dst + i) = *(uint8_t *)(src + i);
+		i++;
+	}
+	return (dst);
+}
+
+char *strcpy(char *dst, const char *src) {
+	char *d = dst;
+
+	while (*src)
+		*d++ = *src++;
+	*d = '\0';
+	return (dst);
+}
+
+int strcmp(const char *s1, const char *s2) {
+	while (*s1 && *s2){
+		if (*s1 != *s2)
+			break;
+		s1++;
+		s2++;
+	}
+	return (*s1 - *s2);
+}
+
+
+
+
+
+
+
+
+
+
+
 

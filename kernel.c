@@ -3,15 +3,6 @@
 
 extern char __bss[], __bss_end[], __stack_top[];
 
-void *memset(void *b, int c, size_t len) {
-	size_t i;
-
-	i = 0;
-	while (i < len)
-		*(uint8_t *)(b + i++) = (uint8_t)c;
-	return (b);
-}
-
 struct sbiret sbi_call(long arg0,long arg1,long arg2,long arg3,long arg4,long arg5,long fid,long eid) {
 	/* fid=funcid, eid=extid(extention id) */	
 	/* ref: https://github.com/riscv-software-src/opensbi/blob/0ad866067d7853683d88c10ea9269ae6001bcf6f/lib/sbi/sbi_ecall_legacy.c#L64 */
@@ -42,7 +33,11 @@ void kernel_main(void) {
 	printf("Hello World\n");
 	printf("Hello %s\n","mahiro");
 	printf("1 + 2 = %d\n",1+2);
-	while (1);
+	printf("hoge" "hoge" "hoge");
+
+	PANIC("panic!!! %s","arg test");
+	printf("ok?");
+	while (1){};
 }
 
 
