@@ -3,6 +3,9 @@
 
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[],__free_ram_end[];
+extern char __kernel_base[];
+extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
+
 
 /* mallocのようにバイト単位で割り当てるのではなく、ページ単位で動的に割り当てる関数
 1ページは一般的に4KB 
@@ -43,6 +46,12 @@ void putchar(char ch) {
 }
 
 
+long getchar(void) {
+	struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+	return ret.error;
+}
+
+
 /* 
 s0~s11  セーブレジスタ(save register) 関数内で使用される一時的なデータを格納するためのレジスタグループ
 a0~a7   引数レジスタ(argument register) 関数呼び出しの際に、関数に渡される引数を格納するために使用される
@@ -55,8 +64,11 @@ __attribute__((naked))
 __attribute__((aligned(4)))
 void kernel_entry(void) {
     __asm__ __volatile__(
-        "csrw sscratch, sp\n" // 例外発生時の実行実行状態をsscratchレジスタに保存
-        "addi sp, sp, -4 * 31\n"
+    	// 実行中プロセスのカーネルスタックをsscratch(一時的な汎用レジスタ) から取り出す 
+	// tmp = sp; sp = sscratch; sscratch = tmp;
+        "csrrw sp, sscratch, sp\n"
+        
+	"addi sp, sp, -4 * 31\n"
         "sw ra,  4 * 0(sp)\n" // sw(store word) raの内容をsp + 4*0バイトに格納
         "sw gp,  4 * 1(sp)\n"
         "sw tp,  4 * 2(sp)\n"
@@ -88,8 +100,13 @@ void kernel_entry(void) {
         "sw s10, 4 * 28(sp)\n"
         "sw s11, 4 * 29(sp)\n"
 
-        "csrr a0, sscratch\n" // sscratchから読み取った値をa0に格納
-        "sw a0, 4 * 30(sp)\n"
+	// 例外発生時のspを取り出して保存
+        "csrr a0, sscratch\n" // sscratchから値を読み取ってa0に保存
+        "sw a0, 4 * 30(sp)\n" // a0に保存したものをsp + 4*30バイトに格納
+
+	// カーネルスタックを再設定
+	"addi a0, sp, 4 * 31\n" //spレジスタに4*31を加えてそれをa0に格納
+	"csrw sscratch, a0\n" // a0の値がsscratchに書き込まれる. csrw, csrrはcsrに対して書き込んだり読み込んだりする操作
 
         "mv a0, sp\n" // a0レジスタにスタックポイントをセット. 指し示すアドレスにはtrap_frame構造体と同じ構造でレジスタの値が保存されている
         "call handle_trap\n"
@@ -128,15 +145,6 @@ void kernel_entry(void) {
         "sret\n" // スーパーバイザーレベルからユーザーレベルへ復帰
     );
 }
-
-void handle_trap(struct trap_frame *f) {
-	uint32_t scause = READ_CSR(scause); // 例外の種類
-	uint32_t stval = READ_CSR(stval); // 例外の負荷情報(ex: 例外の原因となったメモリ情報など)
-	uint32_t user_pc = READ_CSR(sepc); // 例外発生箇所のプログラムカウンタ
-
-	PANIC("unexpected trap scause=%x,stval=%x,sepc=%x", scause, stval, user_pc);
-}
-
 
 struct process procs[PROCS_MAX];
 
@@ -178,8 +186,52 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
     );
 }
 
+/* ページテーブルを構築する関数
+1段目のページテーブル(table1), マップしたい仮想アドレス(vaddr), 
+マップ先の物理アドレス(paddr), ページテーブルエントリに設定するフラグ(flags)を受け取る*/
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+	if (!is_aligned(vaddr,PAGE_SIZE))
+		PANIC("unaligned vaddr %x",vaddr);
+	if (!is_aligned(paddr,PAGE_SIZE))
+		PANIC("unaligned paddr %x",paddr);
+	
+	uint32_t vpn1 = (vaddr >> 22) & 0x3ff; //仮想アドレスの上位から11ビット目から20ビット目までの部分を取り出している
+	if ((table1[vpn1] & PAGE_V) == 0){
+		// 2段目のページテーブルが存在しないので作成する
+		uint32_t pt_paddr = alloc_pages(1);
+		table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
+	}
+	
+	// 2段目のページテーブルにエントリを追加する
+	/* ビット演算
+	
+	*/
+	/* 2段目のページテーブルを用意して、2段目の設定したいページテーブルエントリへマップ先の
+	物理ページ番号とフラグを設定*/
+	uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
+	uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
+	table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+}
 
-struct process *create_process(uint32_t pc) {
+// naked: 関数のプロローグ(エントリ処理) とエピローグ(終了処理) を自動生成せず、ユーザーがアセンブリを直接記述できるようにする
+/* S-Mode(カーネルの特権モード) からU-Mode(ユーザープログラムの非特権モード) に、CPU動作モードを切り替える
+sretで切り替えを行う
+事前準備
+- sepcレジスタにU-Modeに移行した際のプログラムカウンタを設定する
+- sstatusレジスタのSPIEビットをたてる. これによりU-Modeに入った際に割り込みが有効化され、例外と同じようにstvecレジスタに設定しているハンドラが呼ばれる */
+__attribute__((naked)) void user_entry(void) {
+	__asm__ __volatile__(
+		"csrw sepc, %[sepc]\n"
+		"csrw sstatus, %[sstatus]\n"
+		"sret\n"
+		:
+		: [sepc] "r" (USER_BASE),
+			[sstatus] "r" (SSTATUS_SPIE)
+	);
+}
+
+
+struct process *create_process(const void *image, size_t image_size) {
 	// 空いているプロセス管理構造体を探す
 	struct process *proc = NULL;
 	int i = 0;
@@ -210,64 +262,135 @@ struct process *create_process(uint32_t pc) {
 	*--sp = 0; // s2
 	*--sp = 0; // s1
 	*--sp = 0; // s0
-	*--sp = (uint32_t)pc; // ra
+	*--sp = (uint32_t)user_entry; // ra
+
+	uint32_t *page_table = (uint32_t *) alloc_pages(1);
+	/* カーネルのページをマッピングする
+	カーネルページは__kernel_base から __free_ram_endまで.
+	これにより、静的に配置される.text領域や、alloc_pagesなどで動的に配置される領域の
+	両方にカーネルがアクセスできるようになる.*/
+	for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE)
+		map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+	
+	/* ユーザーのページをマッピングする */
+	for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
+		paddr_t page = alloc_pages(1);
+		memcpy((void *) page, image + off, PAGE_SIZE);
+		map_page(page_table, USER_BASE + off, page, PAGE_U | PAGE_R | PAGE_W | PAGE_X);
+	}
 
 	// 各フィールドの初期化
 	proc->pid = i + 1;
 	proc->state = PROC_RUNNABLE;
 	proc->sp = (uint32_t) sp;
+	proc->page_table = page_table;
 	return proc;
 }
 
 
-struct process *proc_a;
-struct process *proc_b;
+struct process *current_proc;  // 現在実行中のプロセス
+struct process *idle_proc;     // アイドルプロセス 実行可能なタスクが存在しない時に実行される特殊なプロセス
 
-void proc_a_entry(void) {
-	printf("hello world from proc_a");
-	while (1){
-		putchar('A');
-		switch_context(&proc_a->sp, &proc_b->sp);
-		int i = 0;
-		while (i++ < 30000000)
-			__asm__ __volatile__("nop"); //何もしない
+/* yieldは譲るという英単語
+CPU時間という資源を他のプロセスに譲る*/
+void yield(void) {
+	// 実行可能なプロセスを探す
+	struct process *next = idle_proc;
+	int i = 0;
+	while (i < PROCS_MAX) {
+		struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
+		if (proc->state == PROC_RUNNABLE && proc->pid > 0) { //idle processはpidが-1
+			next = proc;
+			break;
+		}
+		i++;
+	}
+
+	// 現在実行中のプロセス以外に実行可能なプロセスがない場合戻って処理を実行する
+	if (next == current_proc)
+		return;
+
+	// 実行中のプロセスのカーネルスタックを初期値を設定
+	// ?: なぜswitch_contextではなくここでレジスタを設定するのか
+	__asm__ __volatile__(
+		"sfence.vma\n" // 仮想メモリアクセスの同期. 仮想メモリアドレスの変更が正しく反映されることを保証
+		"csrw satp, %[satp]\n" // satpレジスタ: 仮想メモリのアドレス変換と、保護機構に関連する設定を保持
+		"sfence.vma\n" // 新たなページング設定を反映させるために同期させる
+		"csrw sscratch, %[sscratch]\n"
+		:
+		: [satp] "r" (SATP_SV32 | ((uint32_t) next->page_table / PAGE_SIZE)),
+			[sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)]) //スタックは下位のアドレスに向かって伸びるため、末尾を設定しておく
+	);
+
+	// コンテキストスイッチする
+	struct process *prev = current_proc;
+	current_proc = next;
+	switch_context(&prev->sp, &next->sp);
+}
+
+
+void handle_syscall(struct trap_frame *f) {
+	switch (f->a3) {
+		case SYS_GETCHAR:
+			while (1) {
+				long ch = getchar();
+				if (ch >= 0) {
+					f->a0 = ch;
+					break;
+				}
+				
+				// 文字が入力されるまでSBiを繰り返し呼び出す
+				// ただし単純に繰り返すとCPUを占有してしまうのでyieldでCPUを他のプロセスに譲るようにする
+				yield();
+			}
+			break;
+		case SYS_PUTCHAR:
+			putchar(f->a0);
+			break;
+		case SYS_EXIT:
+			printf("process %d exited\n", current_proc->pid);
+			current_proc->state = PROC_EXITED;
+			yield();
+			PANIC("unreachable");
+		default:
+			PANIC("unexpected syscall a3=%x\n", f->a3);
 	}
 }
 
-void proc_b_entry(void) {
-	printf("hello world from proc_b");
-	while (1){
-		putchar('B');
-		switch_context(&proc_b->sp, &proc_a->sp);
-		int i = 0;
-		while (i++ < 30000000)
-			__asm__ __volatile__("nop");
+void handle_trap(struct trap_frame *f) {
+	uint32_t scause = READ_CSR(scause); // 例外の種類
+	uint32_t stval = READ_CSR(stval); // 例外の負荷情報(ex: 例外の原因となったメモリ情報など)
+	uint32_t user_pc = READ_CSR(sepc); // 例外発生箇所のプログラムカウンタ
+	if (scause == SCAUSE_ECALL) {
+		handle_syscall(f);
+		/* sepcは例外を起こしたプログラムカウンタ、ecallを指している
+		このままだとecallを無限に繰り返してしまうので、命令のサイズ分(4バイト) 加算し、
+		ユーザーモードに戻る際に次の命令から実行を再開するようにしている */
+		user_pc += 4;
+	} else {
+		PANIC("unexpected trap scause=%x,stval=%x,sepc=%x", scause, stval, user_pc);
 	}
-}
 
+	WRITE_CSR(sepc, user_pc);
+}
 
 void kernel_main(void) {
 	/* bss領域をブートローダが認識してゼロクリアしてくれることもあるが、その確証がないため自らの手で初期化*/
 	memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
-
+	
+	// 例外ハンドラのアドレスをstvecレジスタに書き込む
 	WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
-	// print
-	printf("Hello World\n");
-	printf("Hello %s\n","mahiro");
-	printf("1 + 2 = %d\n",1+2);
+	printf("\nHello World from kernel!\n");
 
-	// allocate page
-	paddr_t paddr1 = alloc_pages(2);
-	paddr_t paddr2 = alloc_pages(1);
-	printf("page1 %x\n",paddr1);
-	printf("page2 %x\n",paddr2);
+	idle_proc = create_process(NULL,0);
+	idle_proc->pid = -1; //idle
+	current_proc = idle_proc;
 
-	// process
-	proc_a = create_process((uint32_t)proc_a_entry);
-	proc_b = create_process((uint32_t)proc_b_entry);
-	proc_a_entry();
+	create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
 
+	yield();
+	PANIC("switched to idle process");
 
 	while (1){};
 }

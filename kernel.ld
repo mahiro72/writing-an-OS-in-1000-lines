@@ -5,6 +5,9 @@ SECTIONS {
 	# ページアドレス
 	# . 現在のアドレス
 	. = 0x80200000;
+
+	# カーネルが利用するアドレスの先頭を設定
+	__kernel_base = .;
 	
 	# .text.bootセクションを先頭に配置
 	# .text: コード領域
@@ -25,9 +28,11 @@ SECTIONS {
 		*(.data .data.*);
 	}
 
-	# 読み書き可能データ領域, .dataと違い初期値が0の変数を配置する
+	# 読み書き可能データ領域, 未初期化の静的データ領域を指す
+	# Block Started by Symbol または Block Started by Storageの略
 	.bss : ALIGN(4) {
-		# __bssシンボルに現在のアドレスを割り当てる
+		# __bssシンボルに現在のアドレスを割り当てる. シンボルは関数や静的変数を表すもの
+		# C言語で extern char シンボル名 で定義したシンボルを参照できる
 		__bss = .;
 		*(.bss .bss.* .sbss .sbss.*);
 		__bss_end = .;	

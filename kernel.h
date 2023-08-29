@@ -54,6 +54,7 @@ struct process {
 	int pid;     // プロセスID
 	int state;  // プロセスの状態
 	vaddr_t sp;  // コンテキストスイッチ時のスタックポインタ
+	uint32_t *page_table; // 1段目のページテーブルを指すポインタ
 	
 	/* カーネルスタック: コンテキストスイッチ時のCPUレジスタ、どこから呼ばれたのか(関数の戻り先)、各関数のローカル変数などを保持
 	カーネルスタックをプロセスごとに用意することにより、異なる実行コンテキストを持ち、状態の保存や復元が可能に*/
@@ -61,6 +62,14 @@ struct process {
 };
 
 
+
+// page table
+#define SATP_SV32 (1u << 31)  // 仮想アドレスを物理アドレスに変換する時のページングモードを指定するビット. 0x80000000
+#define PAGE_V    (1 << 0)    // 有効化ビット. 1を左シフト演算子(<<)で0ビット移動
+#define PAGE_R    (1 << 1)    // 読み込み可能
+#define PAGE_W    (1 << 2)    // 書き込み可能
+#define PAGE_X    (1 << 3)    // 実行可能
+#define PAGE_U    (1 << 4)    // ユーザーモードでアクセス可能
 
 #define PANIC(fmt,...) \
 	do { \
@@ -84,3 +93,13 @@ struct process {
 	} while (0)
 
 
+/* user.ldで定義されている開始アドレスと合致する必要あり
+ELFのような一般的な実行可能ファイルであれば、そのファイルのヘッダにロード先のアドレスが書かれている.
+しかし、今回の実行イメージは生バイナリなので、決め内で指定する必要あり */
+#define USER_BASE 0x1000000
+
+#define SSTATUS_SPIE (1 << 5)
+
+#define SCAUSE_ECALL 8
+
+#define PROC_EXITED 2
