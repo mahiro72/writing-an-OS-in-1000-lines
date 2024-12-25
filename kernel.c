@@ -29,19 +29,13 @@ void putchar(char ch) {
     sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* SBI関数ID（Console Putchar）*/);
 }
 
-void *memset(void *buf, char c, size_t n) {
-    uint8_t *p = (uint8_t *) buf;
-    while (n--)
-        *p++ = c;
-    return buf;
-}
-
 void kernel_main(void) {
     // memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
     printf("Hello, World!\n");
     printf("This is a test message. %s\n", "by mahiro");
     printf("This is a test message. %d + %d = %d\n", 1, 2, 1 + 2);
+    printf("call strcmp %d", strcmp("abc", "abd"));
 
     for(;;) {
         __asm__ __volatile__("wfi");
