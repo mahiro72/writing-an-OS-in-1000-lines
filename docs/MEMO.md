@@ -140,3 +140,7 @@ SBI(Supervisor Binary Interface)
 sret命令
 - supervisor return 命令
 - 例外処理から通常の処理に戻るための特別な命令
+
+
+
+4KB=4096=0x1000 16進数では4KBは1000
