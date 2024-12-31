@@ -3,6 +3,7 @@ ENTRY(boot)
 SECTIONS
 {
     . = 0x80200000; /* ページアドレス */
+    __kernel_base = .;
 
     .text : {
         KEEP(*(.text.boot));

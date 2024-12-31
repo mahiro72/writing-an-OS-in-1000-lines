@@ -3,6 +3,7 @@
 
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
+extern char __kernel_base[];
 
 struct process procs[PROCS_MAX];
 struct process *current_proc; // 現在実行中のプロセス
@@ -30,7 +31,7 @@ void putchar(char ch) {
     sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* SBI関数ID（Console Putchar）*/);
 }
 
-paddr_t alloc_page(uint32_t n) {
+paddr_t alloc_pages(uint32_t n) {
     static paddr_t next_paddr = (paddr_t) __free_ram; /* static変数なので関数呼び出し間で値が保持される(グローバル変数のようなイメージ) */
     paddr_t paddr = next_paddr;
     next_paddr += n * PAGE_SIZE;
@@ -79,6 +80,35 @@ void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
     );
 }
 
+/*
+table1: 1段目のページテーブルへのポインタ
+vaddr: マッピングしたい仮想アドレス
+paddr: マッピング先の物理アドレス
+flags: マッピングの属性(読み書きの権限など)
+
+vpn1: 仮想ページ番号の上位10ビット
+vpn0: 仮想ページ番号の中間10ビット
+
+map_pageは仮想アドレスと物理アドレスの対応関係をページテーブルに登録する関数。このテーブルは仮想アドレス参照時にMMUが参照する
+*/
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+    if (!is_aligned(vaddr, PAGE_SIZE))
+        PANIC("unaligned vaddr %x", vaddr);
+    if (!is_aligned(paddr, PAGE_SIZE))
+        PANIC("unaligned paddr %x", paddr);
+
+    uint32_t vpn1 = (vaddr >> 22) & 0x3ff; // 上位10ビットの取得
+    if ((table1[vpn1] & PAGE_V) == 0) {
+        uint32_t pt_paddr = alloc_pages(1); // 2段目のページテーブルが存在しないので作成する
+        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V; // PAGE_SIZEで割ることで何番目のページかを取得し、10ビット左シフトしている。右から10ビットはflagsと有効化ビットとして利用される。flagsのOR演算は単純化のため省略
+    }
+
+    // 2段目のページテーブルにエントリを追加する
+    uint32_t vpn0 = (vaddr >> 12) & 0x3ff; // 中間10ビットの取得
+    uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE); //取得したPPNにPAGE_SIZEをかけて、物理アドレスに変換しCでポインタとして扱えるようにuint32_tでキャスト
+    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+}
+
 struct process *create_process(uint32_t pc) {
     // 空いてるプロセス管理構造体を探す
     struct process *proc = NULL;
@@ -109,10 +139,18 @@ struct process *create_process(uint32_t pc) {
     *--sp = 0;                      // s0
     *--sp = (uint32_t) pc;          // ra
 
+    uint32_t *page_table = (uint32_t *) alloc_pages(1);
+
+    // カーネルのページのマッピング
+    for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE) {
+        map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+    }
+
     // 各フィールドの初期化
     proc->pid = i + 1;
     proc->state = PROC_RUNNABLE;
     proc->sp = (uint32_t) sp;
+    proc->page_table = page_table;
     return proc;
 }
 
@@ -133,9 +171,13 @@ void yield(void) {
     }
 
     __asm__ __volatile__(
+        "sfence.vma\n" // ページテーブルの変更を保証する。ページエントリのキャッシュ(TLB)を消すなども
+        "csrw satp, %[satp]\n" // ページテーブルの設定を制御。PPNを保持
+        "sfence.vma\n"
         "csrw sscratch, %[sscratch]\n"
         :
-        : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+        : [satp] "r" (SATP_SV32 | ((uint32_t) next->page_table / PAGE_SIZE)), //satpレジスタが物理ページ番号を必要とするためPAGE_SIZEで割る
+            [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
     ); //sscratchレジスタにカーネルスタックのアドレスを保存する。これはswitch_context時に参照される
 
     // コンテキストスイッチ
@@ -143,30 +185,6 @@ void yield(void) {
     current_proc = next;
     switch_context(&prev->sp, &current_proc->sp);
 }
-
-/*テスト*/
-void proc_a_entry(void) {
-    printf("starting process A\n");
-    while (1) {
-        putchar('A');
-        yield();
-
-        for (int i = 0; i < 30000000; i++)
-            __asm__ __volatile__("nop");
-    }
-}
-
-void proc_b_entry(void) {
-    printf("starting process B\n");
-    while (1) {
-        putchar('B');
-        yield();
-
-        for (int i = 0; i < 30000000; i++)
-            __asm__ __volatile__("nop");
-    }
-}
-/*テスト*/
 
 __attribute__((naked))
 __attribute__((aligned(4)))
@@ -261,6 +279,31 @@ void handle_trap(struct trap_frame *f) {
     PANIC("unexpected trap scause=%x stval=%x sepc=%x", scause, stval, user_pc);
 }
 
+struct process *proc_a;
+struct process *proc_b;
+
+void proc_a_entry(void) {
+    printf("starting process A\n");
+    while (1) {
+        putchar('A');
+        switch_context(&proc_a->sp, &proc_b->sp);
+
+        for (int i = 0; i < 30000000; i++)
+            __asm__ __volatile__("nop");
+    }
+}
+
+void proc_b_entry(void) {
+    printf("starting process B\n");
+    while (1) {
+        putchar('B');
+        switch_context(&proc_b->sp, &proc_a->sp);
+
+        for (int i = 0; i < 30000000; i++)
+            __asm__ __volatile__("nop");
+    }
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
@@ -270,11 +313,11 @@ void kernel_main(void) {
     idle_proc->pid = -1; // idle
     current_proc = idle_proc;
 
-    struct process *proc_a, *proc_b;
     proc_a = create_process((uint32_t) proc_a_entry);
     proc_b = create_process((uint32_t) proc_b_entry);
     yield();
-    PANIC("switched to idle process");
+
+    PANIC("unreachable here!");
 
     for(;;) {
         __asm__ __volatile__("wfi");

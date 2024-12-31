@@ -70,5 +70,15 @@ struct process {
     int pid; // プロセスID
     int state; // プロセスの状態
     vaddr_t sp; // コンテキストスイッチ時のスタックポインタ。実際はカーネルスタックのいずれかのポインタを保持する
+    uint32_t *page_table; // ページテーブル
     uint8_t stack[8192]; // カーネルスタック
 };
+
+
+#define SATP_SV32 (1u << 31)
+/* ビット演算: 1<<0 1を左に0ビットシフト */
+#define PAGE_V (1 << 0) //有効化ビット
+#define PAGE_R (1 << 1) //読み取り可能ビット
+#define PAGE_W (1 << 2) //書き込み可能ビット
+#define PAGE_X (1 << 3) //実行可能ビット
+#define PAGE_U (1 << 4) //ユーザモードで実行可能ビット
