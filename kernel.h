@@ -61,3 +61,14 @@ struct trap_frame {
         uint32_t __v = (value); \
         __asm__ __volatile__("csrw " #reg ", %0" :: "r"(__v)); \
     } while (0)
+
+#define PROCS_MAX 8 // 最大プロセス数
+#define PROC_UNUSED 0 // プロセスが未使用状態
+#define PROC_RUNNABLE 1 // プロセスが実行可能状態
+
+struct process {
+    int pid; // プロセスID
+    int state; // プロセスの状態
+    vaddr_t sp; // コンテキストスイッチ時のスタックポインタ。実際はカーネルスタックのいずれかのポインタを保持する
+    uint8_t stack[8192]; // カーネルスタック
+};

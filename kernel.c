@@ -1,12 +1,12 @@
 #include "kernel.h"
 #include "common.h"
 
-typedef unsigned char uint8_t;
-typedef unsigned int uint32_t;
-typedef uint32_t size_t;
-
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
+
+struct process procs[PROCS_MAX];
+struct process *current_proc; // 現在実行中のプロセス
+struct process *idle_proc; // 実行可能なプロセスがない時に実行するプロセス。プロセスIDは-1で、起動時に作成される
 
 /* RISC-VのSBI呼び出すをするための関数 */
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4, long arg5, long fid, long eid) {
@@ -43,10 +43,139 @@ paddr_t alloc_page(uint32_t n) {
 }
 
 __attribute__((naked))
+void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
+    __asm__ __volatile__ (
+        "addi sp, sp, -13 * 4\n" //最初のspはプロセス実行時点を指している。つまりprev_sp=sp
+        "sw ra,  0  * 4(sp)\n"
+        "sw s0,  1  * 4(sp)\n"
+        "sw s1,  2  * 4(sp)\n"
+        "sw s2,  3  * 4(sp)\n"
+        "sw s3,  4  * 4(sp)\n"
+        "sw s4,  5  * 4(sp)\n"
+        "sw s5,  6  * 4(sp)\n"
+        "sw s6,  7  * 4(sp)\n"
+        "sw s7,  8  * 4(sp)\n"
+        "sw s8,  9  * 4(sp)\n"
+        "sw s9,  10 * 4(sp)\n"
+        "sw s10, 11 * 4(sp)\n"
+        "sw s11, 12 * 4(sp)\n"
+        "sw sp, (a0)\n" // a0(prev_sp) に最新のsp(-13*4したもの)を設定する
+        "lw sp, (a1)\n" // a1(next_sp) から次のspを読み込む
+        "lw ra,  0  * 4(sp)\n"
+        "lw s0,  1  * 4(sp)\n"
+        "lw s1,  2  * 4(sp)\n"
+        "lw s2,  3  * 4(sp)\n"
+        "lw s3,  4  * 4(sp)\n"
+        "lw s4,  5  * 4(sp)\n"
+        "lw s5,  6  * 4(sp)\n"
+        "lw s6,  7  * 4(sp)\n"
+        "lw s7,  8  * 4(sp)\n"
+        "lw s8,  9  * 4(sp)\n"
+        "lw s9,  10 * 4(sp)\n"
+        "lw s10, 11 * 4(sp)\n"
+        "lw s11, 12 * 4(sp)\n"
+        "addi sp, sp, 13 * 4\n" // レジスタの復元が終わったので spを復元情報の一番下まで移動する。sp利用時に復元時の情報を上書きしていくことになるが、パフォーマンス重視のため問題なし。0埋めするのもありだが、セキュリティレベルが上がる一方、パフォーマンス低下のトレードオフがある
+        "ret\n" // raの位置にジャンプ
+    );
+}
+
+struct process *create_process(uint32_t pc) {
+    // 空いてるプロセス管理構造体を探す
+    struct process *proc = NULL;
+    int i;
+    for (i = 0; i< PROCS_MAX; i++) {
+        if (procs[i].state == PROC_UNUSED) {
+            proc = &procs[i];
+            break;
+        }
+    }
+
+    if (!proc)
+        PANIC("no free process slots");
+
+    // switch_contextで復帰できるように、スタックに呼び出先保存レジスタを積む
+    uint32_t *sp = (uint32_t *) &proc->stack[sizeof(proc->stack)];
+    *--sp = 0;                      // s11
+    *--sp = 0;                      // s10
+    *--sp = 0;                      // s9
+    *--sp = 0;                      // s8
+    *--sp = 0;                      // s7
+    *--sp = 0;                      // s6
+    *--sp = 0;                      // s5
+    *--sp = 0;                      // s4
+    *--sp = 0;                      // s3
+    *--sp = 0;                      // s2
+    *--sp = 0;                      // s1
+    *--sp = 0;                      // s0
+    *--sp = (uint32_t) pc;          // ra
+
+    // 各フィールドの初期化
+    proc->pid = i + 1;
+    proc->state = PROC_RUNNABLE;
+    proc->sp = (uint32_t) sp;
+    return proc;
+}
+
+void yield(void) {
+    // 実行可能なプロセスを探す
+    struct process *next = idle_proc;
+    for (int i = 0; i < PROCS_MAX; i++) {
+        struct process *proc = &procs[(current_proc->pid+i) % PROCS_MAX];
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
+            next = proc;
+            break;
+        }
+    }
+
+    // current process以外に実行可能なプロセスがない場合、戻って処理を再開する
+    if (next == current_proc) {
+        return;
+    }
+
+    __asm__ __volatile__(
+        "csrw sscratch, %[sscratch]\n"
+        :
+        : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+    ); //sscratchレジスタにカーネルスタックのアドレスを保存する。これはswitch_context時に参照される
+
+    // コンテキストスイッチ
+    struct process *prev = current_proc;
+    current_proc = next;
+    switch_context(&prev->sp, &current_proc->sp);
+}
+
+/*テスト*/
+void proc_a_entry(void) {
+    printf("starting process A\n");
+    while (1) {
+        putchar('A');
+        yield();
+
+        for (int i = 0; i < 30000000; i++)
+            __asm__ __volatile__("nop");
+    }
+}
+
+void proc_b_entry(void) {
+    printf("starting process B\n");
+    while (1) {
+        putchar('B');
+        yield();
+
+        for (int i = 0; i < 30000000; i++)
+            __asm__ __volatile__("nop");
+    }
+}
+/*テスト*/
+
+__attribute__((naked))
 __attribute__((aligned(4)))
 void kernel_entry(void) {
     __asm__ __volatile__(
-        "csrw sscratch, sp\n"
+        // 以降の例ではユーザモードで例外が発生されたていでのコメントが記載されているが、カーネルや例外ハンドリング中の例外が発生するパターンもある
+        // 例外発生時にはspに例外が発生したプロセスのユーザスタックポインタが入っている
+        "csrrw sp, sscratch, sp\n" // spとsscratchの交換。ここでカーネルスタックのアドレスがspに保存され、sscratchにはユーザスタックポインタが保存される
+
         "addi sp, sp, -4 * 31\n" /* スタックポインタ(上に伸びていく) を減算し、枠を確保してから例外発生時の状態を保存する */
         "sw ra,  4 * 0(sp)\n" /* store word: raレジスタをメモリに保存 */
         "sw gp,  4 * 1(sp)\n"
@@ -79,10 +208,14 @@ void kernel_entry(void) {
         "sw s10, 4 * 28(sp)\n"
         "sw s11, 4 * 29(sp)\n"
 
-        "csrr a0, sscratch\n" /* a0にスタックポインタの先頭をいれる。CSRから直接メモリ保存はできないにおで一度汎用レジスタに読み込む必要がある */
+        "csrr a0, sscratch\n" /* a0にsscratch(ユーザのスタックポインタ)の先頭をいれる。CSRから直接メモリ保存はできないので一度汎用レジスタに読み込む必要がある。a0である必要はなく汎用レジスタであればおk */
         "sw a0, 4 * 30(sp)\n"
 
-        "mv a0, sp\n" /* 現在のspをa0にコピーし、関数呼び出時の引数とする */
+        // カーネルスタックを設定し直す
+        "addi a0, sp, 4 * 31\n" /* sp(カーネルのスタックポインタ)に4 * 31足したものをa0に設定する */
+        "csrw sscratch, a0\n"
+
+        "mv a0, sp\n" /* 現在のsp(カーネルのスタックポインタ) をa0にコピーし、関数呼び出時の引数とする */
         "call handle_trap\n"
 
         "lw ra,  4 * 0(sp)\n" /* load word: spから読み込んでレジスタに入れる */
@@ -133,10 +266,15 @@ void kernel_main(void) {
 
     WRITE_CSR(stvec, (uint32_t) kernel_entry); /* stvecレジスタにkernel_entryのアドレスを書き込み、例外ハンドラの場所をCPUに伝える */
 
-    paddr_t paddr0 = alloc_page(2);
-    paddr_t paddr1 = alloc_page(1);
-    printf("paddr0=%x, paddr1=%x\n", paddr0, paddr1); /* paddr0=80221000, paddr1=80223000 */
-    PANIC("booted!");
+    idle_proc = create_process((uint32_t) NULL);
+    idle_proc->pid = -1; // idle
+    current_proc = idle_proc;
+
+    struct process *proc_a, *proc_b;
+    proc_a = create_process((uint32_t) proc_a_entry);
+    proc_b = create_process((uint32_t) proc_b_entry);
+    yield();
+    PANIC("switched to idle process");
 
     for(;;) {
         __asm__ __volatile__("wfi");
