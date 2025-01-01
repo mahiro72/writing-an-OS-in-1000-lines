@@ -32,6 +32,11 @@ void putchar(char ch) {
     sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* SBI関数ID（Console Putchar）*/);
 }
 
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2 /* SBI関数ID（Console Getchar）*/);
+    return ret.error;
+}
+
 paddr_t alloc_pages(uint32_t n) {
     static paddr_t next_paddr = (paddr_t) __free_ram; /* static変数なので関数呼び出し間で値が保持される(グローバル変数のようなイメージ) */
     paddr_t paddr = next_paddr;
@@ -299,12 +304,43 @@ void kernel_entry(void) {
     );
 }
 
+void handle_syscall(struct trap_frame *f) {
+    switch (f->a3) {
+        case SYS_PUTCHAR:
+            putchar(f->a0);
+            break;
+        case SYS_GETCHAR:
+            while (1) {
+                long ch = getchar();
+                if (ch >= 0) {
+                    f->a0 = ch;
+                    break;
+                }
+                yield(); // CPUを占有しないよう他プロセスに譲る
+            }
+            break;
+        case SYS_EXIT:
+            printf("process %d exited\n", current_proc->pid);
+            current_proc->state = PROC_EXITED;
+            yield();
+            PANIC("unreachable"); //このプロセスに戻ってくることはないためyield以降の処理は実行されない
+        default:
+            PANIC("unknown syscall a3=%x", f->a3);
+    }
+}
+
 void handle_trap(struct trap_frame *f) {
     uint32_t scause = READ_CSR(scause);
     uint32_t stval = READ_CSR(stval);
     uint32_t user_pc = READ_CSR(sepc);
+    if (scause == SCAUSE_ECALL) { //ecallによる例外かの確認。他にもpage fault(不正メモリアクセス)などもある
+        handle_syscall(f);
+        user_pc += 4; // 例外処理から戻る際に同じ命令を実行しないように+4して次の命令アドレスに移る
+    } else {
+        PANIC("unexpected trap scause=%x stval=%x sepc=%x", scause, stval, user_pc);
+    }
 
-    PANIC("unexpected trap scause=%x stval=%x sepc=%x", scause, stval, user_pc);
+    WRITE_CSR(sepc, user_pc);
 }
 
 void kernel_main(void) {

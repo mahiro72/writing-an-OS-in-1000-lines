@@ -65,6 +65,7 @@ struct trap_frame {
 #define PROCS_MAX 8 // 最大プロセス数
 #define PROC_UNUSED 0 // プロセスが未使用状態
 #define PROC_RUNNABLE 1 // プロセスが実行可能状態
+#define PROC_EXITED 2
 
 struct process {
     int pid; // プロセスID
@@ -84,6 +85,6 @@ struct process {
 #define PAGE_U (1 << 4) //ユーザモードで実行可能ビット
 
 #define USER_BASE 0x1000000
-
 #define SSTATUS_SPIE (1 << 5) // sstatusの5ビット目(SPIE)として定義
+#define SCAUSE_ECALL 8
 

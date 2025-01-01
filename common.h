@@ -27,3 +27,7 @@ void *memcpy(void *dst, const void *src, size_t n);
 char *strcpy(char *dst, const char *src);
 int strcmp(const char *s1, const char *s2);
 void printf(const char *fmt, ...);
+
+#define SYS_PUTCHAR 1
+#define SYS_GETCHAR 2
+#define SYS_EXIT 3
