@@ -4,6 +4,7 @@
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
 extern char __kernel_base[];
+extern char _binary_shell_bin_start[], _binary_shell_bin_size[];
 
 struct process procs[PROCS_MAX];
 struct process *current_proc; // 現在実行中のプロセス
@@ -109,7 +110,23 @@ void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
     table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
 }
 
-struct process *create_process(uint32_t pc) {
+__attribute__((naked))
+void user_entry(void) {
+    // S-Mode(特権モード) からU-Mode(非特権モード) への切り替え
+    __asm__ __volatile__(
+        "csrw sepc, %[sepc]\n" // U-Mode移行後に実行する命令のアドレスを設定
+        "csrw sstatus, %[sstatus]\n" // SPIEビットを立てる
+        "sret\n" // S-ModeからU-Modeへの切り替え。sepcのアドレスにジャンプ、U-Modeに設定変更、sstatusの変更を行うなど
+        :
+        : [sepc] "r" (USER_BASE), [sstatus] "r" (SSTATUS_SPIE)
+    );
+}
+
+/*
+image: 実行イメージへのポインタ ここではshell.binの先頭アドレスが渡される想定
+image_size: 実行イメージのサイズ
+*/
+struct process *create_process(const void *image, size_t image_size) {
     // 空いてるプロセス管理構造体を探す
     struct process *proc = NULL;
     int i;
@@ -137,13 +154,24 @@ struct process *create_process(uint32_t pc) {
     *--sp = 0;                      // s2
     *--sp = 0;                      // s1
     *--sp = 0;                      // s0
-    *--sp = (uint32_t) pc;          // ra
+    *--sp = (uint32_t) user_entry;  // ra
 
     uint32_t *page_table = (uint32_t *) alloc_pages(1);
 
     // カーネルのページのマッピング
     for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE) {
         map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+    }
+
+    // ユーザのページのマッピング
+    for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
+        paddr_t page = alloc_pages(1);
+
+        size_t remaining = image_size - off;
+        size_t copy_size = PAGE_SIZE <= remaining ? PAGE_SIZE : remaining;
+
+        memcpy((void *) page, image + off, copy_size);
+        map_page(page_table, USER_BASE + off, page, PAGE_U | PAGE_R | PAGE_W | PAGE_X);
     }
 
     // 各フィールドの初期化
@@ -279,49 +307,21 @@ void handle_trap(struct trap_frame *f) {
     PANIC("unexpected trap scause=%x stval=%x sepc=%x", scause, stval, user_pc);
 }
 
-struct process *proc_a;
-struct process *proc_b;
-
-void proc_a_entry(void) {
-    printf("starting process A\n");
-    while (1) {
-        putchar('A');
-        switch_context(&proc_a->sp, &proc_b->sp);
-
-        for (int i = 0; i < 30000000; i++)
-            __asm__ __volatile__("nop");
-    }
-}
-
-void proc_b_entry(void) {
-    printf("starting process B\n");
-    while (1) {
-        putchar('B');
-        switch_context(&proc_b->sp, &proc_a->sp);
-
-        for (int i = 0; i < 30000000; i++)
-            __asm__ __volatile__("nop");
-    }
-}
-
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
+    printf("\n\n");
+
     WRITE_CSR(stvec, (uint32_t) kernel_entry); /* stvecレジスタにkernel_entryのアドレスを書き込み、例外ハンドラの場所をCPUに伝える */
 
-    idle_proc = create_process((uint32_t) NULL);
+    idle_proc = create_process(NULL, 0);
     idle_proc->pid = -1; // idle
     current_proc = idle_proc;
 
-    proc_a = create_process((uint32_t) proc_a_entry);
-    proc_b = create_process((uint32_t) proc_b_entry);
+    create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
     yield();
 
-    PANIC("unreachable here!");
-
-    for(;;) {
-        __asm__ __volatile__("wfi");
-    }
+    PANIC("switched to idle process!");
 }
 
 __attribute__((section(".text.boot"))) /* .text.bootのメモリセクションにコードを配置する */
