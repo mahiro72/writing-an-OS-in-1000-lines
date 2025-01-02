@@ -93,3 +93,9 @@ int strcmp(const char *s1, const char *s2) {
     return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
+int len(const char *s) {
+    int i = 0;
+    while (*s++)
+        i++;
+    return i;
+}

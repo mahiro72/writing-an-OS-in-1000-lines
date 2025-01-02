@@ -87,16 +87,17 @@ struct process {
 #define USER_BASE 0x1000000
 #define SSTATUS_SPIE (1 << 5) // sstatusの5ビット目(SPIE)として定義
 #define SCAUSE_ECALL 8
-
+#define SSTATUS_SUM  (1 << 18)
 
 // virtio
 // 基本設定
-#define SECTOR_SIZE       512    // ディスクの1セクタのサイズ（バイト）
-#define VIRTQ_ENTRY_NUM   16     // 仮想キューのエントリ数
-#define VIRTIO_DEVICE_BLK 2      // ブロックデバイスの種類識別子
-#define VIRTIO_BLK_PADDR  0x10001000  // デバイスの物理アドレス
+#define SECTOR_SIZE       512         // ディスクの1セクタのサイズ（バイト）。セクタはディスクの物理的な最小読み書き単位
+#define VIRTQ_ENTRY_NUM   16          // 仮想キューのエントリ数
+#define VIRTIO_DEVICE_BLK 2           // ブロックデバイスの種類識別子
+#define VIRTIO_BLK_PADDR  0x10001000  // デバイスレジスタ群の開始アドレス
 
 // VirtIOレジスタのオフセット
+// OSからの操作ではメモリアドレスとして操作できるが、MMUではMMIO用のメモリと判断され、VirtIO到達時には事前に確保されたメモリ領域がレジスタとして扱われる
 #define VIRTIO_REG_MAGIC         0x00  // マジック値のレジスタ
 #define VIRTIO_REG_VERSION       0x04  // バージョン情報
 #define VIRTIO_REG_DEVICE_ID     0x08  // デバイスID
@@ -160,7 +161,7 @@ struct virtio_virtq {
     struct virtq_desc descs[VIRTQ_ENTRY_NUM];  // デスクリプタキュー
     struct virtq_avail avail;                  // 使用可能キュー
     struct virtq_used used __attribute__((aligned(PAGE_SIZE)));  // 使用済みキュー（ページ境界にアライン）
-    int queue_index;                           // このキューのインデックス
+    int queue_index;                           // このキューのインデックス VirtIOは複数のキューを持つことができ、indexで識別する
     volatile uint16_t *used_index;             // 現在の使用済みインデックスへのポインタ
     uint16_t last_used_index;                  // 最後に確認した使用済みインデックス
 } __attribute__((packed));
@@ -177,3 +178,35 @@ struct virtio_blk_req {
     // 3つ目のディスクリプタ: デバイスから書き込み可 (VIRTQ_DESC_F_WRITE)
     uint8_t status; // リクエストの完了ステータス
 } __attribute__((packed));
+
+
+#define FILES_MAX      2
+#define DISK_MAX_SIZE  align_up(sizeof(struct file) * FILES_MAX, SECTOR_SIZE)
+
+struct tar_header {
+    char name[100];
+    char mode[8];
+    char uid[8];
+    char gid[8];
+    char size[12];
+    char mtime[12];
+    char checksum[8];
+    char type;
+    char linkname[100];
+    char magic[6];
+    char version[2];
+    char uname[32];
+    char gname[32];
+    char devmajor[8];
+    char devminor[8];
+    char prefix[155];
+    char padding[12];
+    char data[];      // ヘッダに続くデータ領域を指す配列 (フレキシブル配列メンバ)
+} __attribute__((packed));
+
+struct file {
+    bool in_use;      // このファイルエントリが使われているか
+    char name[100];   // ファイル名
+    char data[1024];  // ファイルの内容
+    size_t size;      // ファイルサイズ
+};

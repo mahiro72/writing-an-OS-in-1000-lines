@@ -30,6 +30,15 @@ void exit(void) {
     for(;;); //念の為
 }
 
+int readfile(const char *filename, char *buf, int len) {
+    return syscall(SYS_READFILE, (int) filename, (int) buf, len); //ポインタを整数にキャストして渡す
+}
+
+int writefile(const char *filename, const char *buf, int len) {
+    return syscall(SYS_WRITEFILE, (int) filename, (int) buf, len);
+}
+
+
 /* カーネルのalloc_pagesでゼロ埋めの保証がされているため、ユーザランドでは省略できる */
 __attribute__((section(".text.start")))
 __attribute__((naked))

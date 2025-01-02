@@ -37,6 +37,14 @@ prompt:
             // do nothing
         } else if (strcmp(cmdline, "exit") == 0) {
             exit();
+        } else if (strcmp(cmdline, "readfile") == 0) {
+            char buf[128];
+            int len = readfile("./hello.txt", buf, sizeof(buf));
+            buf[len] = '\0';
+            printf("%s\n", buf);
+        } else if (strcmp(cmdline, "writefile") == 0) {\
+            char *msg = "hello from shell by writefile command";
+            writefile("./hello.txt", (const char *) msg, len(msg));
         } else {
             printf("sh: %s: command not found\n", cmdline);
         }
